@@ -1752,6 +1752,10 @@ def api_upsert_device(store_number, device_type, device_number, manufacturer, mo
         if conn:
             conn.close()
 
+def store_exists(cur, store_number: int) -> bool:
+    cur.execute("SELECT 1 FROM stores WHERE store_number=%s LIMIT 1;", (store_number,))
+    return cur.fetchone() is not None
+
 
 @app.route("/admin/import_devices", methods=["POST"])
 def import_devices():
@@ -1766,44 +1770,58 @@ def import_devices():
         summary = {"insert": 0, "update": 0, "skip": 0, "applied": 0, "error": 0}
         err_rows = []
 
-        for idx, r in enumerate(rows):
-            store_number = r.get("store_number") or r.get("Store Number")
-            device_type  = r.get("device_type")  or r.get("Device Type")
-            device_number= r.get("device_number")or r.get("Device Number")
-            manufacturer = r.get("manufacturer") or r.get("Manufacturer")
-            model        = r.get("model")        or r.get("Model")
+        # one DB connection for store-existence checks
+        conn_check = get_db_conn()
+        cur_check = conn_check.cursor()
+        try:
+            for idx, r in enumerate(rows):
+                store_number = r.get("store_number") or r.get("Store Number")
+                device_type  = r.get("device_type")  or r.get("Device Type")
+                device_number= r.get("device_number")or r.get("Device Number")
+                manufacturer = r.get("manufacturer") or r.get("Manufacturer")
+                model        = r.get("model")        or r.get("Model")
 
-            try:
-                store_number = int(str(store_number).strip())
-            except Exception:
-                summary["error"] += 1
-                err_rows.append({"row_index": idx, "error": f"Bad Store Number: {store_number}", "row": r})
-                continue
+                try:
+                    store_number = int(str(store_number).strip())
+                except Exception:
+                    summary["error"] += 1
+                    err_rows.append({"row_index": idx, "error": f"Bad Store Number: {store_number}", "row": r})
+                    continue
 
-            if dry_run:
-                ok, action, err = api_device_dryrun_action(
-                    store_number, device_type, device_number, manufacturer, model
-                )
-                if ok:
-                    # action will be insert/update/skip
-                    if action in summary:
-                        summary[action] += 1
+               
+                if not store_exists(cur_check, store_number):
+                    summary["error"] += 1
+                    err_rows.append({
+                        "row_index": idx,
+                        "error": f"Store {store_number} does not exist in stores table (FK would fail).",
+                        "row": r
+                    })
+                    continue
+
+                if dry_run:
+                    ok, action, err = api_device_dryrun_action(
+                        store_number, device_type, device_number, manufacturer, model
+                    )
+                    if ok:
+                        summary[action if action in summary else "skip"] += 1
                     else:
-                        # just in case
-                        summary["skip"] += 1
+                        summary["error"] += 1
+                        err_rows.append({"row_index": idx, "error": err, "row": r})
                 else:
-                    summary["error"] += 1
-                    err_rows.append({"row_index": idx, "error": err, "row": r})
-
-            else:
-                ok, _, err = api_upsert_device(
-                    store_number, device_type, device_number, manufacturer, model
-                )
-                if ok:
-                    summary["applied"] += 1
-                else:
-                    summary["error"] += 1
-                    err_rows.append({"row_index": idx, "error": err, "row": r})
+                    ok, _, err = api_upsert_device(
+                        store_number, device_type, device_number, manufacturer, model
+                    )
+                    if ok:
+                        summary["applied"] += 1
+                    else:
+                        summary["error"] += 1
+                        err_rows.append({"row_index": idx, "error": err, "row": r})
+        finally:
+            try:
+                cur_check.close()
+            except Exception:
+                pass
+            conn_check.close()
 
         return jsonify({
             "ok": True,
@@ -1815,6 +1833,7 @@ def import_devices():
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 
 

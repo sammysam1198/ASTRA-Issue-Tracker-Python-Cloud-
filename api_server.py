@@ -793,8 +793,7 @@ def auth_change_pin():
 
     return jsonify({"message": "PIN changed successfully"}), 200
 
-ADMIN_EMAIL = "sammi.fishbein@jtax.com".lower()  # your admin email, lowercased
-
+ADMIN_EMAIL = "sammi.fishbein@jtax.com".lower()
 
 @app.post("/admin/verify")
 def admin_verify():

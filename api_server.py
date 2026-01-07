@@ -1680,76 +1680,106 @@ def api_device_dryrun_action(store_number, device_type, device_number, manufactu
 
 
 def api_upsert_device(store_number, device_type, device_number, manufacturer, model):
-    conn = None
+    conn = get_db_conn()
+    cur = conn.cursor()
     try:
-        conn = get_db_conn()
-        cur = conn.cursor()
-
-        dt = (device_type or "").strip()
+        dt = (device_type or "").strip().title()  # Normalize (e.g., "printer" -> "Printer")
+        if dt == "Cradlepoint":
+            dt = "CradlePoint"
         dn = (device_number or "").strip() or None
         mf = (manufacturer or "").strip() or None
         md = (model or "").strip() or None
 
-        dt_norm = dt.strip().title()
-        if dt_norm == "Cradlepoint":
-            dt_norm = "CradlePoint"
+        exists = False
+        needs_update = False
 
-        if dt_norm in ("Printer", "CradlePoint"):
-            sql = """
-            INSERT INTO store_devices (device_uid, store_number, device_type, manufacturer, model)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (store_number, device_type)
-            WHERE device_type IN ('Printer', 'CradlePoint')
-            DO NOTHING;
-            """
-            cur.execute(sql, (str(uuid.uuid4()), store_number, dt_norm, mf, md))
+        if dt in ("Printer", "CradlePoint"):
+            # Key: store_number + device_type (no device_number)
+            cur.execute("""
+                SELECT manufacturer, model
+                FROM store_devices
+                WHERE store_number = %s AND device_type = %s
+                LIMIT 1
+            """, (store_number, dt))
+            existing = cur.fetchone()
+            if existing:
+                exists = True
+                # For these types, original logic: no update (DO NOTHING), so skip
 
-        elif dt_norm == "Phone":
+        elif dt == "Phone":
             if not dn:
                 return False, None, "Phone row missing device_number"
+            # Key: store_number + device_number (with device_type fixed)
+            cur.execute("""
+                SELECT manufacturer, model
+                FROM store_devices
+                WHERE store_number = %s AND device_type = 'Phone' AND device_number = %s
+                LIMIT 1
+            """, (store_number, dn))
+            existing = cur.fetchone()
+            if existing:
+                exists = True
+                # For Phone, original logic: no update (DO NOTHING), so skip
 
-            sql = """
-            INSERT INTO store_devices (device_uid, store_number, device_type, device_number, manufacturer, model)
-            VALUES (%s, %s, 'Phone', %s, %s, %s)
-            ON CONFLICT (store_number, device_number)
-            WHERE device_type = 'Phone'
-            DO NOTHING;
-            """
-            cur.execute(sql, (str(uuid.uuid4()), store_number, dn, mf, md))
-
-        elif dt_norm == "Computer":
+        elif dt == "Computer":
             if not dn:
                 return False, None, "Computer row missing device_number"
-
-            sql = """
-            INSERT INTO store_devices (device_uid, store_number, device_type, device_number, manufacturer, model)
-            VALUES (%s, %s, 'Computer', %s, %s, %s)
-            ON CONFLICT (store_number, device_number)
-            WHERE device_type = 'Computer'
-            DO UPDATE SET
-              manufacturer = EXCLUDED.manufacturer,
-              model = EXCLUDED.model,
-              updated_at = NOW()
-            WHERE
-              store_devices.manufacturer IS DISTINCT FROM EXCLUDED.manufacturer
-              OR store_devices.model IS DISTINCT FROM EXCLUDED.model;
-            """
-            cur.execute(sql, (str(uuid.uuid4()), store_number, dn, mf, md))
+            # Key: store_number + device_number (with device_type fixed)
+            cur.execute("""
+                SELECT manufacturer, model
+                FROM store_devices
+                WHERE store_number = %s AND device_type = 'Computer' AND device_number = %s
+                LIMIT 1
+            """, (store_number, dn))
+            existing = cur.fetchone()
+            if existing:
+                exists = True
+                ex_mf, ex_md = existing
+                # For Computer, original logic: update only if manufacturer or model differs
+                if (ex_mf != mf) or (ex_md != md):
+                    needs_update = True
 
         else:
             return False, None, f"Unsupported device type: {device_type}"
 
-        conn.commit()
-        return True, None, None
+        if exists:
+            if needs_update:
+                # Update (only for Computer)
+                cur.execute("""
+                    UPDATE store_devices
+                    SET manufacturer = %s,
+                        model = %s,
+                        updated_at = NOW()
+                    WHERE store_number = %s
+                      AND device_type = %s
+                      AND device_number = %s
+                """, (mf, md, store_number, dt, dn))
+                conn.commit()
+                return True, "update", None
+            else:
+                # Skip (no change needed)
+                return True, "skip", None
+        else:
+            # Insert new row
+            device_uid = str(uuid.uuid4())
+            cur.execute("""
+                INSERT INTO store_devices
+                    (device_uid, store_number, device_type, device_number, manufacturer, model)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (device_uid, store_number, dt, dn, mf, md))
+            conn.commit()
+            return True, "insert", None
 
     except Exception as e:
-        if conn:
-            conn.rollback()
-        return False, None, str(e)
+        conn.rollback()
+        err = str(e)
+        if hasattr(e, "pgerror") and e.pgerror:
+            err = e.pgerror
+        return False, None, err
 
     finally:
-        if conn:
-            conn.close()
+        cur.close()
+        conn.close()
 
 def store_exists(cur, store_number: int) -> bool:
     cur.execute("SELECT 1 FROM stores WHERE store_number=%s LIMIT 1;", (store_number,))

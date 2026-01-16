@@ -2034,6 +2034,13 @@ def import_devices():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# --- Ensure DB schema exists on Render/Gunicorn import ---
+try:
+    init_db()
+except Exception as e:
+    # Keep the service booting so you can still see logs/routes,
+    # but you should check Render logs for this message.
+    print(f"[init_db] failed: {e}")
 
 
 if __name__ == "__main__":

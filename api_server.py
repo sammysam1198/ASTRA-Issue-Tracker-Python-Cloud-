@@ -1213,31 +1213,27 @@ def admin_delete_user():
 
 # --Scheduling--------------
 
-@app.post("/schedule/init-store/{store_number}")
+@app.post("/schedule/init-store/<int:store_number>")
 def init_store_schedule(store_number: int):
     conn = get_db_conn()
     cur = conn.cursor()
-
     cur.execute("""
         INSERT INTO schedule_availability (store_number, day_of_week, status)
         SELECT %s, d, 'STANDARD'
         FROM generate_series(0,6) AS d
         ON CONFLICT (store_number, day_of_week) DO NOTHING;
     """, (store_number,))
-
     conn.commit()
     cur.close()
     conn.close()
-    return {"ok": True, "store_number": store_number}
+    return jsonify({"ok": True, "store_number": store_number})
 
 
-
-@app.get("/schedule/store/{store_number}")
+@app.get("/schedule/store/<int:store_number>")
 def get_store_schedule(store_number: int):
     conn = get_db_conn()
     cur = conn.cursor()
 
-    # Make sure rows exist (optional but super convenient)
     cur.execute("""
         INSERT INTO schedule_availability (store_number, day_of_week, status)
         SELECT %s, d, 'STANDARD'
@@ -1275,22 +1271,22 @@ def get_store_schedule(store_number: int):
     def t(v):
         return v.strftime("%H:%M") if v else None
 
-    return {
+    return jsonify({
         "store_number": store_number,
         "days": [
             {
-                "day": r[0],
-                "status": r[1],
-                "start": t(r[2]),
-                "end": t(r[3]),
-                "updated_at": r[4].isoformat() if r[4] else None
+                "day": r["day_of_week"],
+                "status": r["status"],
+                "start": t(r["resolved_start"]),
+                "end": t(r["resolved_end"]),
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None
             }
             for r in rows
         ]
-    }
-    
+    })
 
-@app.get("/schedule/employees/{store_number}")
+
+@app.get("/schedule/employees/<int:store_number>")
 def get_employees(store_number: int):
     conn = get_db_conn()
     cur = conn.cursor()
@@ -1304,20 +1300,18 @@ def get_employees(store_number: int):
     cur.close()
     conn.close()
 
-    return {
+    return jsonify({
         "store_number": store_number,
         "employees": [
             {
-                "employee_uid": r[0],
-                "full_name": r[1],
-                "role_title": r[2],
-                "is_active": r[3],
-                "archived_until": r[4].isoformat() if r[4] else None
+                "employee_uid": r["employee_uid"],
+                "full_name": r["full_name"],
+                "role_title": r["role_title"],
+                "is_active": r["is_active"],
+                "archived_until": r["archived_until"].isoformat() if r["archived_until"] else None
             } for r in rows
         ]
-    }
-
-
+    })
 
 
 

@@ -1215,7 +1215,7 @@ def admin_delete_user():
 
 @app.post("/schedule/init-store/{store_number}")
 def init_store_schedule(store_number: int):
-    conn = get_db_connection()
+    conn = get_db_conn()
     cur = conn.cursor()
 
     cur.execute("""
@@ -1234,7 +1234,7 @@ def init_store_schedule(store_number: int):
 
 @app.get("/schedule/store/{store_number}")
 def get_store_schedule(store_number: int):
-    conn = get_db_connection()
+    conn = get_db_conn()
     cur = conn.cursor()
 
     # Make sure rows exist (optional but super convenient)
@@ -1292,7 +1292,7 @@ def get_store_schedule(store_number: int):
 
 @app.get("/schedule/employees/{store_number}")
 def get_employees(store_number: int):
-    conn = get_db_connection()
+    conn = get_db_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT employee_uid, full_name, role_title, is_active, archived_until

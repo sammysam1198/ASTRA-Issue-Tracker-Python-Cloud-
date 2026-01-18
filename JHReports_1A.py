@@ -20,7 +20,15 @@ except ImportError:
 
 
 
-APP_VERSION = "5.6.0"
+APP_VERSION = "6.1.0"
+
+# Dark Mode
+DARK_BG_1 = "#0d1117"  # main background
+DARK_BG_2 = "#151b23"  # panels / frames
+DARK_BG_3 = "#1e242a"  # inputs / boxes
+
+TEXT_PRIMARY = "#ffffff"
+TEXT_SECONDARY = "#c9d1d9"  # optional, GitHub-style soft white
 
 
 # ----------------------------

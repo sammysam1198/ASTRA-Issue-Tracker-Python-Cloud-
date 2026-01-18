@@ -1,8 +1,12 @@
 import os
+import csv
 import requests
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, simpledialog, filedialog
 from datetime import datetime
+from XLEngine import XLSetupSession
+from XLConsole import XLScriptConsoleWindow
+
 
 
 # Pillow is optional – used for the logo
@@ -146,6 +150,33 @@ def api_get_all_issues():
         return False, [], "Server returned unexpected data format."
     return True, rows, None
 
+
+def api_admin_import_devices(api_base_url: str, rows: list[dict], dry_run: bool, timeout: int = 60):
+    """
+    Calls your Render API endpoint:
+      POST /admin/import_devices
+    Body:
+      { "dry_run": true/false, "rows": [...] }
+
+    Returns: (ok: bool, data: dict|None, err: str|None)
+    """
+    try:
+        url = api_base_url.rstrip("/") + "/admin/import_devices"
+        payload = {"dry_run": bool(dry_run), "rows": rows}
+        r = requests.post(url, json=payload, timeout=timeout)
+        try:
+            data = r.json()
+        except Exception:
+            return False, None, f"Non-JSON response ({r.status_code}): {r.text[:300]}"
+
+        if r.status_code != 200 or not data.get("ok", False):
+            return False, data, data.get("error", f"HTTP {r.status_code}")
+
+        return True, data, None
+    except Exception as e:
+        return False, None, str(e)
+
+
 def api_get_devices_by_store(store_number: int):
     """
     Call GET /devices/by-store
@@ -217,6 +248,106 @@ def api_admin_change_password(
     else:
         msg = data.get("error") or resp.text
         return False, msg
+
+
+def import_tech_info_csv(self):
+    """
+    GUI flow:
+      1) pick CSV
+      2) send rows as DRY RUN
+      3) show summary
+      4) ask confirm
+      5) send rows as REAL import
+    """
+    # 1) pick file
+    path = filedialog.askopenfilename(
+        title="Select Tech Info CSV",
+        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+    )
+    if not path:
+        return
+
+    # 2) read CSV into rows
+    try:
+        rows = []
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for r in reader:
+                rows.append(r)
+        if not rows:
+            messagebox.showwarning("Import Tech Info (CSV)", "CSV file had no rows.")
+            return
+    except Exception as e:
+        messagebox.showerror("Import Tech Info (CSV)", f"Failed to read CSV:\n{e}")
+        return
+
+    # You likely already have API base URL stored somewhere:
+    api_base = getattr(self.controller, "api_base_url", None) or getattr(self.controller, "API_BASE_URL", None)
+    if not api_base:
+        messagebox.showerror("Import Tech Info (CSV)", "Missing API base URL in controller.")
+        return
+
+    # 3) DRY RUN
+    ok, data, err = api_admin_import_devices(api_base, rows, dry_run=True, timeout=90)
+    if not ok:
+        msg = err or "Unknown error"
+        messagebox.showerror("Tech Info Import (Dry Run)", msg)
+        return
+
+    summary = (data.get("summary") or {})
+    inserts = summary.get("insert", 0)
+    updates = summary.get("update", 0)
+    skips   = summary.get("skip", 0)
+    errors  = summary.get("error", 0)
+    processed = data.get("processed", len(rows))
+
+    report = (
+        "Tech Info Import (Dry Run)\n"
+        "--------------------------\n"
+        f"Rows: {processed}\n"
+        f"Inserts: {inserts}\n"
+        f"Updates: {updates}\n"
+        f"Skips: {skips}\n"
+        f"Errors: {errors}\n"
+    )
+
+    # show a few error details
+    if errors:
+        report += "\nFirst errors (up to 10):\n"
+        for item in (data.get("errors") or [])[:10]:
+            report += f"- Row {item.get('row_index')}: {item.get('error')}\n"
+
+    # Put it in whatever textbox you use for output (adjust to your app)
+    try:
+        self.controller.append_output(report)  # if you have a helper
+    except Exception:
+        # fallback: if you have a text widget reference, use that
+        if hasattr(self, "text") and self.text:
+            self.text.insert("end", report + "\n")
+            self.text.see("end")
+
+    # 4) confirm
+    if not messagebox.askyesno(
+        "Confirm Import",
+        "Dry run complete.\n\nApply these changes to the database?"
+    ):
+        return
+
+    # 5) REAL IMPORT
+    ok2, data2, err2 = api_admin_import_devices(api_base, rows, dry_run=False, timeout=120)
+    if not ok2:
+        messagebox.showerror("Tech Info Import", err2 or "Unknown error")
+        return
+
+    processed2 = data2.get("processed", len(rows))
+    summary2 = (data2.get("summary") or {})
+    applied = summary2.get("applied", 0)
+    errors2 = summary2.get("error", 0)
+
+    messagebox.showinfo(
+        "Tech Info Import",
+        f"Import complete.\n\nRows: {processed2}\nApplied: {applied}\nErrors: {errors2}"
+    )
 
 
 def api_admin_change_pin(
@@ -975,14 +1106,8 @@ class MainMenuFrame(GradientFrame):
         btn_frame.pack(anchor="w")
 
         buttons = [
-            ("Report Issue", lambda: self.controller.show_frame("ReportIssueFrame")),
-            ("Edit Issue", lambda: self.controller.show_frame("EditIssueFrame")),
-            ("Update Status", self.not_implemented_yet),
-            ("View Issues (One Store)", lambda: self.controller.show_frame("ViewOneStoreFrame")),
-            ("View All Issues", lambda: self.controller.show_frame("ViewAllIssuesFrame")),
-            ("Search Issues", self.not_implemented_yet),
-            ("Remove Issue", self.not_implemented_yet),
-            ("Print All Issues", self.not_implemented_yet),
+            ("Issue Tracking", lambda: self.controller.show_frame("IssueTrackingFrame")),
+            ("Scheduling", lambda: self.controller.show_frame("SchedulingFrame")),
             ("Utilities", lambda: self.controller.show_frame("UtilitiesFrame")),
         ]
 
@@ -1027,9 +1152,89 @@ class MainMenuFrame(GradientFrame):
     def not_implemented_yet(self):
         messagebox.showinfo("Coming soon", "Feature not finished yet.")
 
-# ----------------------------
-# UTILITIES/MENU FRAME(S)
-# ----------------------------
+# ----------------------------------------
+
+class IssueTrackingFrame(GradientFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+
+        title = GradientFrame.label(
+            self.inner_frame,
+            "Issue Tracking",
+            font=("Segoe UI", 20, "bold"),
+        )
+        title.pack(pady=25)
+
+        btn_frame = GradientFrame.subframe(self.inner_frame, padx=20, pady=15)
+        btn_frame.pack(pady=10)
+
+        buttons = [
+            ("Report Issue", lambda: self.controller.show_frame("ReportIssueFrame")),
+            ("Edit Issue", lambda: self.controller.show_frame("EditIssueFrame")),
+            ("Update Status", self.not_implemented_yet),
+            ("View Issues (One Store)", lambda: self.controller.show_frame("ViewOneStoreFrame")),
+            ("View All Issues", lambda: self.controller.show_frame("ViewAllIssuesFrame")),
+            ("Search Issues", self.not_implemented_yet),
+            ("Remove Issue", self.not_implemented_yet),
+            ("Print All Issues", self.not_implemented_yet),
+        ]
+
+        for label, cmd in buttons:
+            tk.Button(btn_frame, text=label, width=25, command=cmd).pack(pady=4)
+
+        tk.Button(
+            btn_frame,
+            text="Back to Main Menu",
+            width=25,
+            command=lambda: self.controller.show_frame("MainMenuFrame"),
+        ).pack(pady=(12, 4))
+
+    def not_implemented_yet(self):
+        messagebox.showinfo("Coming soon", "Feature not finished yet.")
+
+class SchedulingFrame(GradientFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+
+        title = GradientFrame.label(
+            self.inner_frame,
+            "Scheduling",
+            font=("Segoe UI", 20, "bold"),
+        )
+        title.pack(pady=25)
+
+        btn_frame = GradientFrame.subframe(self.inner_frame, padx=20, pady=15)
+        btn_frame.pack(pady=10)
+
+        tk.Button(
+            btn_frame,
+            text="Visual Availability",
+            width=30,
+            command=lambda: self.controller.show_frame("VisualAvlFrame"),
+        ).pack(pady=4)
+
+        tk.Button(
+            btn_frame,
+            text="Employee List",
+            width=30,
+            command=lambda: self.controller.show_frame("EmployeeFrame"),
+        ).pack(pady=4)
+
+        tk.Button(
+            btn_frame,
+            text="Data Management",
+            width=30,
+            command=lambda: self.controller.show_frame("DataMgmtFrame"),
+        ).pack(pady=4)
+
+        tk.Button(
+            btn_frame,
+            text="Back to Main Menu",
+            width=30,
+            command=lambda: self.controller.show_frame("MainMenuFrame"),
+        ).pack(pady=(12, 4))
 
 class UtilitiesFrame(GradientFrame):
     """
@@ -1209,6 +1414,7 @@ class UtilitiesFrame(GradientFrame):
 
         return email, password, pin
 
+# -----UTILITIES-FRAME-------------------------
 
 class TechInfoByStoreFrame(GradientFrame):
     """
@@ -1700,16 +1906,17 @@ class AdminToolsFrame(GradientFrame):
         self.btn_list_users = tk.Button(left_frame, text="List Users", width=25, command=self.admin_list_users)
         self.btn_list_users.pack(pady=4)
 
-        self.btn_create_user = tk.Button(left_frame, text="Create New User", width=25, command=self.open_create_user_window)
-        self.btn_create_user.pack(pady=4)
-
         self.btn_list_stores = tk.Button(left_frame, text="List All Store Info", width=25, command=self.admin_list_stores)
         self.btn_list_stores.pack(pady=4)
 
         self.btn_list_issues = tk.Button(left_frame, text="List All Issues", width=25, command=self.admin_list_issues)
         self.btn_list_issues.pack(pady=4)
 
+        # ---- Account Management section (Create New User moved here, TOP) ----
         GradientFrame.label(left_frame, "Account Management", font=("Segoe UI", 12, "bold")).pack(pady=(12, 4))
+
+        self.btn_create_user = tk.Button(left_frame, text="Create New User", width=25, command=self.open_create_user_window)
+        self.btn_create_user.pack(pady=4)
 
         self.btn_admin_change_pw = tk.Button(left_frame, text="Admin Change Password", width=25, command=self.admin_change_password)
         self.btn_admin_change_pw.pack(pady=4)
@@ -1720,13 +1927,18 @@ class AdminToolsFrame(GradientFrame):
         self.btn_admin_delete_user = tk.Button(left_frame, text="Admin Delete User", width=25, command=self.admin_delete_user)
         self.btn_admin_delete_user.pack(pady=4)
 
+        # ---- System section ----
         GradientFrame.label(left_frame, "System", font=("Segoe UI", 12, "bold")).pack(pady=(12, 4))
 
         self.btn_admin_restart_api = tk.Button(left_frame, text="Admin Restart API", width=25, command=self.admin_restart_api)
         self.btn_admin_restart_api.pack(pady=4)
 
         self.btn_switch_admin = tk.Button(left_frame, text="Use Different Admin Credentials", width=25, command=self.clear_admin_session)
-        self.btn_switch_admin.pack(pady=(12, 4))
+        self.btn_switch_admin.pack(pady=4)
+
+        # ✅ New button goes here (between switch admin and back)
+        self.btn_import_tech = tk.Button(left_frame, text="Import Tech Info (CSV)", width=25, command=self.import_tech_info_csv)
+        self.btn_import_tech.pack(pady=4)
 
         tk.Button(left_frame, text="Back to Utilities", width=25, command=lambda: self.controller.show_frame("UtilitiesFrame")).pack(pady=(20, 4))
 
@@ -1735,7 +1947,14 @@ class AdminToolsFrame(GradientFrame):
         self.report_title_label.pack(pady=(0, 6))
 
         panel_bg = right_frame.cget("bg")
-        self.report_text = scrolledtext.ScrolledText(right_frame, width=80, height=25, wrap="word", bg=panel_bg, fg=JH_WHITE_TEXT)
+        self.report_text = scrolledtext.ScrolledText(
+            right_frame,
+            width=80,
+            height=25,
+            wrap="word",
+            bg=panel_bg,
+            fg=JH_WHITE_TEXT
+        )
         self.report_text.pack(fill="both", expand=True)
 
         # ------------- BOTTOM OF RIGHT SIDE -------------
@@ -1749,6 +1968,9 @@ class AdminToolsFrame(GradientFrame):
         self.current_report_prefix = "admin_report"
         self.bind("<<ShowFrame>>", self.on_show_frame)
 
+    # =============================
+    # SHOW / PERMISSIONS
+    # =============================
     def on_show_frame(self, event=None):
         if not self.controller.current_email:
             messagebox.showerror("Error", "No email associated with this session.")
@@ -1823,6 +2045,45 @@ class AdminToolsFrame(GradientFrame):
         self.report_text.insert("end", content)
         self.report_text.config(state="disabled")
 
+    def clear_admin_session(self):
+        if not self.controller.admin_session:
+            self.controller.admin_session = {"verified": False, "scope": "none"}
+        else:
+            self.controller.admin_session["verified"] = False
+            self.controller.admin_session["scope"] = "none"
+        self.apply_permissions()
+        messagebox.showinfo("Admin Session", "Cleared. Enter new credentials on next action.")
+
+    def apply_permissions(self):
+        s = self.controller.admin_session or {}
+        scope = s.get("scope", "none")
+
+        self.btn_list_users.config(state="normal")
+        self.btn_switch_admin.config(state="normal" if s.get("verified") else "disabled")
+
+        state_full = "normal" if scope == "full" else "disabled"
+        for b in (
+            self.btn_create_user,
+            self.btn_list_stores,
+            self.btn_list_issues,
+            self.btn_admin_change_pw,
+            self.btn_admin_change_pin,
+            self.btn_admin_delete_user,
+            self.btn_admin_restart_api,
+            self.btn_import_tech,  # ✅ require full admin
+        ):
+            b.config(state=state_full)
+
+    def ensure_full_admin(self):
+        s = self.controller.admin_session or {}
+        if s.get("verified") and s.get("scope") == "full":
+            return True
+        messagebox.showerror("Access Denied", "Full admin access required for this action.")
+        return False
+
+    # =============================
+    # ADMIN AUTH PROMPTS
+    # =============================
     def _require_admin_credentials(self):
         """Prompt for password/pin for current user (trusted admin)"""
         email = self.controller.current_email
@@ -1866,28 +2127,141 @@ class AdminToolsFrame(GradientFrame):
 
         return email, password, pin
 
-    def clear_admin_session(self):
-        self.controller.admin_session["verified"] = False
-        self.controller.admin_session["scope"] = "none"
-        self.apply_permissions()
-        messagebox.showinfo("Admin Session", "Cleared. Enter new credentials on next action.")
+    # =============================
+    # CSV IMPORT (BUILT-IN)
+    # =============================
+    def _api_admin_import_devices(self, rows: list, dry_run: bool, timeout: int = 120):
+        """
+        Calls Render API endpoint:
+          POST /admin/import_devices
+        Body:
+          { "dry_run": true/false, "rows": [...] }
+        Returns: (ok: bool, data: dict|None, err: str|None)
+        """
+        try:
+            url = f"{API_BASE}/admin/import_devices"
+            payload = {"dry_run": bool(dry_run), "rows": rows}
+            resp = requests.post(url, json=payload, timeout=timeout)
+            try:
+                data = resp.json()
+            except Exception:
+                return False, None, f"Non-JSON response ({resp.status_code}): {resp.text[:300]}"
 
-    def apply_permissions(self):
-        s = self.controller.admin_session or {}
-        scope = s.get("scope", "none")
+            if resp.status_code != 200 or not data.get("ok", False):
+                return False, data, data.get("error", f"HTTP {resp.status_code}")
 
-        self.btn_list_users.config(state="normal")
-        self.btn_switch_admin.config(state="normal" if s.get("verified") else "disabled")
+            return True, data, None
+        except Exception as e:
+            return False, None, str(e)
 
-        state = "normal" if scope == "full" else "disabled"
-        for b in (self.btn_create_user, self.btn_list_stores, self.btn_list_issues, self.btn_admin_change_pw, self.btn_admin_change_pin, self.btn_admin_delete_user, self.btn_admin_restart_api):
-            b.config(state=state)
+    def import_tech_info_csv(self):
+        if not self.ensure_full_admin():
+            return
 
+        path = filedialog.askopenfilename(
+            title="Select Tech Info CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not path:
+            return
+
+        # Read CSV rows
+        try:
+            rows = []
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    rows.append(r)
+
+            if not rows:
+                messagebox.showwarning("Import Tech Info (CSV)", "CSV file had no rows.")
+                return
+        except Exception as e:
+            messagebox.showerror("Import Tech Info (CSV)", f"Failed to read CSV:\n{e}")
+            return
+
+        # DRY RUN
+        ok, data, err = self._api_admin_import_devices(rows, dry_run=True, timeout=180)
+        if not ok:
+            messagebox.showerror("Tech Import (Dry Run)", err or "Unknown error")
+            return
+
+        summary = data.get("summary") or {}
+        processed = data.get("processed", len(rows))
+        inserts = summary.get("insert", 0)
+        updates = summary.get("update", 0)
+        skips = summary.get("skip", 0)
+        errors = summary.get("error", 0)
+
+        report_lines = [
+            "Tech Info Import (DRY RUN)",
+            "--------------------------",
+            f"File: {os.path.basename(path)}",
+            f"Rows: {processed}",
+            "",
+            f"Inserts: {inserts}",
+            f"Updates: {updates}",
+            f"Skips:   {skips}",
+            f"Errors:  {errors}",
+            "",
+        ]
+
+        if errors:
+            report_lines.append("First errors (up to 10):")
+            for item in (data.get("errors") or [])[:10]:
+                report_lines.append(f"- Row {item.get('row_index')}: {item.get('error')}")
+
+        report = "\n".join(report_lines) + "\n"
+        self._show_report("Tech Import (Dry Run)", report, "tech_import_dryrun")
+
+        if not messagebox.askyesno(
+            "Confirm Import",
+            "Dry run complete.\n\nApply these changes to the database?"
+        ):
+            return
+
+        # REAL APPLY
+        ok2, data2, err2 = self._api_admin_import_devices(rows, dry_run=False, timeout=300)
+        if not ok2:
+            messagebox.showerror("Tech Import", err2 or "Unknown error")
+            return
+
+        summary2 = data2.get("summary") or {}
+        processed2 = data2.get("processed", len(rows))
+        applied2 = summary2.get("applied", 0)
+        errors2 = summary2.get("error", 0)
+
+        report2_lines = [
+            "Tech Info Import (APPLIED)",
+            "--------------------------",
+            f"File: {os.path.basename(path)}",
+            f"Rows: {processed2}",
+            "",
+            f"Applied: {applied2}",
+            f"Errors:  {errors2}",
+            "",
+        ]
+
+        if errors2:
+            report2_lines.append("First errors (up to 20):")
+            for item in (data2.get("errors") or [])[:20]:
+                report2_lines.append(f"- Row {item.get('row_index')}: {item.get('error')}")
+
+        report2 = "\n".join(report2_lines) + "\n"
+        self._show_report("Tech Import (Applied)", report2, "tech_import_applied")
+
+        if errors2:
+            messagebox.showwarning("Tech Import", f"Import finished with errors: {errors2}\nSee report panel.")
+        else:
+            messagebox.showinfo("Tech Import", "Import complete (no errors).")
+
+    # =============================
+    # ADMIN ACTIONS (EXISTING)
+    # =============================
     def admin_list_users(self):
         s = self.controller.admin_session or {}
         if not s.get("verified"):
-            # Force elevation if not done yet
-            self.on_show_frame()  # re-runs the prompt logic
+            self.on_show_frame()
             return
 
         ok, users, error = api_admin_list_users(s["admin_email"], s["password"], s["pin"])
@@ -1906,23 +2280,12 @@ class AdminToolsFrame(GradientFrame):
         content = "\n".join(lines) + "\n"
         self._show_report("Users", content, "users")
 
-
-    def ensure_full_admin(self):
-        s = self.controller.admin_session or {}
-        if s.get("verified") and s.get("scope") == "full":
-            return True
-        messagebox.showerror("Access Denied", "Full admin access required for this action.")
-        return False
-
-
-
     def open_create_user_window(self):
         """Open a small admin dialog to create a new user via /auth/register."""
         win = tk.Toplevel(self)
         win.title("Create User")
         win.geometry("400x260")
 
-        # ----- Form fields -----
         tk.Label(win, text="Email:").grid(row=0, column=0, sticky="e", padx=5, pady=5)
         email_entry = tk.Entry(win, width=35)
         email_entry.grid(row=0, column=1, padx=5, pady=5)
@@ -1943,7 +2306,6 @@ class AdminToolsFrame(GradientFrame):
         pin_entry = tk.Entry(win, width=10)
         pin_entry.grid(row=4, column=1, sticky="w", padx=5, pady=5)
 
-        # ----- Submit handler -----
         def submit():
             email = email_entry.get().strip()
             username = username_entry.get().strip()
@@ -1963,12 +2325,7 @@ class AdminToolsFrame(GradientFrame):
                 messagebox.showerror("Error", "PIN must be 4–6 digits.")
                 return
 
-            payload = {
-                "email": email,
-                "username": username,
-                "password": password,
-                "pin": pin,
-            }
+            payload = {"email": email, "username": username, "password": password, "pin": pin}
 
             try:
                 resp = requests.post(f"{API_BASE}/auth/register", json=payload, timeout=10)
@@ -1976,17 +2333,12 @@ class AdminToolsFrame(GradientFrame):
                 messagebox.showerror("Network Error", f"Error talking to server:\n{e}")
                 return
 
-            if resp.status_code == 201 or resp.status_code == 200:
+            if resp.status_code in (200, 201):
                 messagebox.showinfo("Success", "User created successfully.")
                 win.destroy()
             else:
-                # Show server response body so you can see validation errors, etc.
-                messagebox.showerror(
-                    "Error",
-                    f"Failed to create user.\nStatus: {resp.status_code}\n\n{resp.text}",
-                )
+                messagebox.showerror("Error", f"Failed to create user.\nStatus: {resp.status_code}\n\n{resp.text}")
 
-        # ----- Buttons -----
         btn_frame = tk.Frame(win)
         btn_frame.grid(row=5, column=0, columnspan=2, pady=15)
 
@@ -1994,13 +2346,11 @@ class AdminToolsFrame(GradientFrame):
         tk.Button(btn_frame, text="Cancel", command=win.destroy).pack(side="left", padx=5)
 
     def admin_list_stores(self):
-        # Require full admin (not borrowed "users_read")
         if not self.ensure_full_admin():
             return
 
         s = self.controller.admin_session or {}
         if not s.get("verified"):
-            # If somehow not verified, run your normal prompt flow
             self.on_show_frame()
             return
 
@@ -2029,7 +2379,6 @@ class AdminToolsFrame(GradientFrame):
         self._show_report("All Store Info", content, "stores")
 
     def admin_list_issues(self):
-        # Require full admin (not borrowed "users_read")
         if not self.ensure_full_admin():
             return
 
@@ -2047,18 +2396,18 @@ class AdminToolsFrame(GradientFrame):
             self._show_report("All Issues", "No issues found.\n", "issues")
             return
 
-        lines = []
-        total_issues = 0
-
         from collections import defaultdict
         by_store = defaultdict(list)
         for row in rows:
             key = (row.get("store_name"), row.get("store_number"))
             by_store[key].append(row)
 
+        lines = []
+        total_issues = 0
+
         for (sName, sNum), issue_rows in sorted(
-                by_store.items(),
-                key=lambda k: (k[0][1] or 0, (k[0][0] or "").lower())
+            by_store.items(),
+            key=lambda k: (k[0][1] or 0, (k[0][0] or "").lower())
         ):
             if not issue_rows:
                 continue
@@ -2077,7 +2426,7 @@ class AdminToolsFrame(GradientFrame):
                 lines.append(f"Details: {r.get('details', '')}")
                 lines.append("-" * 40)
 
-            lines.append("")  # spacing
+            lines.append("")
 
         header = f"Total Issues: {total_issues}\n\n"
         content = header + "\n".join(lines) + "\n"
@@ -2113,7 +2462,6 @@ class AdminToolsFrame(GradientFrame):
             messagebox.showinfo("Success", msg)
         else:
             messagebox.showerror("Error", msg)
-
 
     def admin_change_pin(self):
         if not self.ensure_full_admin():
@@ -2190,107 +2538,6 @@ class AdminToolsFrame(GradientFrame):
             messagebox.showinfo("Restart Requested", msg)
         else:
             messagebox.showerror("Error", msg)
-
-
-    def elevate_as_current_user(self):
-        email = self.controller.current_email
-        username = self.controller.current_username
-
-        # Client-side hint only; server still enforces real admin auth
-        if not self.controller.current_is_admin:
-            messagebox.showerror("Access Denied", "You are not a trusted admin.")
-            return False
-
-        password = simpledialog.askstring(
-            "Admin Verification",
-            f"Enter password for {email}:",
-            show="*",
-            parent=self,
-        )
-        if password is None:
-            return False
-
-        pin = simpledialog.askstring(
-            "Admin Verification",
-            f"Enter admin PIN for {email}:",
-            show="*",
-            parent=self,
-        )
-        if pin is None:
-            return False
-
-        ok, msg = api_admin_verify(email, password, pin)
-        if not ok:
-            messagebox.showerror("Verification Failed", msg)
-            return False
-
-        self.controller.admin_session = {
-            "verified": True,
-            "scope": "full",
-            "admin_username": username,
-            "admin_email": email,
-            "password": password,
-            "pin": pin,
-        }
-        return True
-
-    def elevate_with_admin_credentials(self):
-        # Admin username
-        admin_username = simpledialog.askstring(
-            "Admin Credentials",
-            "Enter ADMIN username:",
-            parent=self,
-        )
-        if admin_username is None or not admin_username.strip():
-            return False
-        admin_username = admin_username.strip()
-
-        admin_password = simpledialog.askstring(
-            "Admin Credentials",
-            f"Enter password for {admin_username}:",
-            show="*",
-            parent=self,
-        )
-        if admin_password is None:
-            return False
-
-        admin_pin = simpledialog.askstring(
-            "Admin Credentials",
-            "Enter admin PIN:",
-            show="*",
-            parent=self,
-        )
-        if admin_pin is None:
-            return False
-
-        # We need admin email to call /admin/verify, but your client may not know it by username.
-        # EASIEST: ask for admin email here OR add a server endpoint to verify by username.
-        admin_email = simpledialog.askstring(
-            "Admin Credentials",
-            "Enter admin email (jtax):",
-            parent=self,
-        )
-        if admin_email is None or not admin_email.strip():
-            return False
-        admin_email = admin_email.strip()
-
-        ok, msg = api_admin_verify(admin_email, admin_password, admin_pin)
-        if not ok:
-            messagebox.showerror("Verification Failed", msg)
-            return False
-
-        # If current user != admin user, limit scope
-        scope = "full" if admin_username.lower() == (self.controller.current_username or "").lower() else "users_read"
-
-        self.controller.admin_session = {
-            "verified": True,
-            "scope": scope,
-            "admin_username": admin_username,
-            "admin_email": admin_email,
-            "password": admin_password,
-            "pin": admin_pin,
-        }
-        return True
 
 class StoreSearchFrame(GradientFrame):
     """
@@ -2735,9 +2982,7 @@ class ChangePINFrame(GradientFrame):
         else:
             messagebox.showerror("Error", msg)
 
-# ----------------------------
-# REPORT ISSUE FRAME
-# ----------------------------
+# -----ISSUE-TRACKER------------------------------
 
 class ReportIssueFrame(GradientFrame):
 
@@ -3016,10 +3261,6 @@ class ReportIssueFrame(GradientFrame):
         self.entry_global_num.delete(0, "end")
         self.entry_issue_name.delete(0, "end")
         self.text_description.delete("1.0", "end")
-
-# ----------------------------
-# EDIT ISSUE FRAME (ASTRA-proofed)
-# ----------------------------
 
 class EditIssueFrame(GradientFrame):
     """
@@ -3437,10 +3678,6 @@ class EditIssueFrame(GradientFrame):
         self.form_frame.pack_forget()
         self.status_label.config(text="Changes cancelled. Load an issue to edit again.")
 
-# ----------------------------
-# VIEW ONE ISSUE FRAME
-# ----------------------------
-
 class ViewOneStoreFrame(GradientFrame):
     """
     View issues for a single store by store number or store name.
@@ -3631,10 +3868,6 @@ class ViewOneStoreFrame(GradientFrame):
 
         self.text.configure(state="disabled")
         self.status_label.config(text=f"Loaded {len(rows)} issue(s).")
-
-# ----------------------------
-# VIEW ALL ISSUE FRAME
-# ----------------------------
 
 class ViewAllIssuesFrame(GradientFrame):
     """
@@ -3850,6 +4083,294 @@ class ViewAllIssuesFrame(GradientFrame):
         self.text.configure(state="disabled")
         self.status_label.config(text=f"Done. Loaded {total_issues} issue(s) across {store_count} store(s).")
 
+# -----SCHEDULING-FRAME----------------------------
+
+class VisualAvlFrame(GradientFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+
+        GradientFrame.label(
+            self.inner_frame,
+            "Visual Availability",
+            font=("Segoe UI", 20, "bold")
+        ).pack(pady=20)
+
+        controls = GradientFrame.subframe(self.inner_frame, padx=15, pady=10)
+        controls.pack(fill="x")
+
+        tk.Label(controls, text="Store Number:").pack(side="left", padx=(0, 6))
+        self.store_entry = tk.Entry(controls, width=10)
+        self.store_entry.pack(side="left")
+
+        tk.Button(
+            controls,
+            text="Load",
+            command=self.load_schedule
+        ).pack(side="left", padx=10)
+
+        self.output = tk.Text(self.inner_frame, height=14, width=60)
+        self.output.pack(padx=20, pady=10, fill="both", expand=True)
+
+        tk.Button(
+            self.inner_frame,
+            text="Back to Scheduling",
+            width=22,
+            command=lambda: self.controller.show_frame("SchedulingFrame")
+        ).pack(pady=15)
+
+    def load_schedule(self):
+        store_txt = self.store_entry.get().strip()
+        if not store_txt.isdigit():
+            messagebox.showerror("Invalid store", "Enter a numeric store number.")
+            return
+
+        store_number = int(store_txt)
+
+        try:
+            url = f"{API_BASE}/schedule/store/{store_number}"
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load schedule:\n{e}")
+            return
+
+        day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+        self.output.delete("1.0", "end")
+        self.output.insert("end", f"Store {store_number} — Availability (read-only)\n\n")
+
+        days = data.get("days") or []
+        if not days:
+            self.output.insert("end", "(No schedule rows returned.)\n")
+            self.output.insert("end", "Tip: the API normally auto-initializes 7 days on first GET.\n")
+            return
+
+        for d in days:
+            day_idx = d.get("day")
+            status = (d.get("status") or "").upper()
+            start = d.get("start")
+            end = d.get("end")
+
+            name = day_names[day_idx] if isinstance(day_idx, int) and 0 <= day_idx <= 6 else str(day_idx)
+
+            if status in ("STANDARD", "CUSTOM"):
+                # If something weird happens and start/end are None, show it clearly
+                if start and end:
+                    line = f"{name}: {start} - {end} ({status})"
+                else:
+                    line = f"{name}: (missing time) ({status})"
+            elif status == "OFF":
+                line = f"{name}: OFF"
+            elif status == "BLOCK":
+                line = f"{name}: BLOCK"
+            else:
+                line = f"{name}: {status or '(unknown)'}"
+
+            self.output.insert("end", line + "\n")
+
+class EmployeeFrame(GradientFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+
+        GradientFrame.label(
+            self.inner_frame, "Employee List",
+            font=("Segoe UI", 20, "bold")
+        ).pack(pady=20)
+
+        controls = GradientFrame.subframe(self.inner_frame, padx=15, pady=10)
+        controls.pack(fill="x")
+
+        GradientFrame.label(controls, "Store Number:").pack(side="left", padx=(0, 6))
+
+        self.store_entry = tk.Entry(controls, width=10)
+        self.store_entry.pack(side="left")
+
+        tk.Button(controls, text="Load", command=self.load_employees).pack(side="left", padx=10)
+
+        self.output = tk.Text(self.inner_frame, height=16, width=70)
+        self.output.pack(padx=20, pady=10, fill="both", expand=True)
+
+        tk.Button(
+            self.inner_frame,
+            text="Back to Scheduling",
+            width=22,
+            command=lambda: self.controller.show_frame("SchedulingFrame")
+        ).pack(pady=12)
+
+    def load_employees(self):
+        store_txt = self.store_entry.get().strip()
+        if not store_txt.isdigit():
+            messagebox.showerror("Invalid store", "Enter a numeric store number.")
+            return
+
+        store_number = int(store_txt)
+
+        try:
+            url = f"{API_BASE}/schedule/employees/{store_number}"
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load employees:\n{e}")
+            return
+
+        self.output.delete("1.0", "end")
+        self.output.insert("end", f"Store {store_number} Employees\n\n")
+
+        employees = data.get("employees") or []
+        if not employees:
+            self.output.insert("end", "(No employees found)\n")
+            return
+
+        for emp in employees:
+            name = emp.get("full_name") or "Unnamed"
+            role = emp.get("role_title") or ""
+            active = bool(emp.get("is_active"))
+            archived_until = emp.get("archived_until")
+
+            status = "ACTIVE" if active else "INACTIVE"
+            if archived_until:
+                status += f" (archived until {archived_until[:10]})"
+
+            line = f"- {name}"
+            if role:
+                line += f" — {role}"
+            line += f" — {status}"
+            self.output.insert("end", line + "\n")
+
+class DataMgmtFrame(GradientFrame):
+    def __init__(self, parent, controller):
+        super().__init__(parent)
+        self.controller = controller
+
+        self.xl_session = XLSetupSession(workbook_filename="AVL_DB_2D.xlsx")
+
+        GradientFrame.label(
+            self.inner_frame,
+            "Scheduling Data Management",
+            font=("Segoe UI", 20, "bold")
+        ).pack(pady=25)
+
+        # --- action buttons ---
+        btn_frame = GradientFrame.subframe(self.inner_frame, padx=20, pady=15)
+        btn_frame.pack(pady=(10, 8))
+
+        tk.Button(
+            btn_frame,
+            text="Add Data (XLScript)",
+            width=28,
+            command=self.open_XLConsole
+        ).pack(pady=4)
+
+        tk.Button(
+            btn_frame,
+            text="Edit Employees",
+            width=28,
+            command=self.open_employee_tools_readonly
+        ).pack(pady=4)
+
+        tk.Button(
+            btn_frame,
+            text="Adjust Store Hours",
+            width=28,
+            command=self.open_hours_readonly
+        ).pack(pady=4)
+
+        tk.Button(
+            btn_frame,
+            text="Download Data",
+            width=28,
+            command=self.download_readonly
+        ).pack(pady=4)
+
+        # --- log panel so user always sees feedback ---
+        GradientFrame.label(
+            self.inner_frame,
+            "Log",
+            font=("Segoe UI", 12, "bold")
+        ).pack(pady=(10, 4))
+
+        self.log = tk.Text(self.inner_frame, height=10, width=75)
+        self.log.pack(padx=20, pady=(0, 10), fill="both", expand=True)
+
+        tk.Button(
+            self.inner_frame,
+            text="Back to Scheduling",
+            width=28,
+            command=lambda: self.controller.show_frame("SchedulingFrame")
+        ).pack(pady=(0, 12))
+
+        self._log_line("Ready. These tools are read-only placeholders for now.")
+
+    def _log_line(self, msg: str):
+        self.log.insert("end", msg.rstrip() + "\n")
+        self.log.see("end")
+
+    def open_XLConsole(self):
+        XLScriptConsoleWindow(self, session=self.xl_session, api_mode=False)
+
+    # -----------------------
+    # Read-only placeholder actions (Phase 1)
+    # -----------------------
+
+    def open_employee_tools_readonly(self):
+        self._log_line("[Employees] Tools opened (read-only). Next phase: add/edit/archive employees.")
+        self._simple_popup(
+            title="Employee Tools (Read-Only Placeholder)",
+            body=(
+                "Next step (Phase 2):\n"
+                "- Import schedule_employees\n"
+                "- Add employee create/archive endpoints\n"
+                "- Wire UI forms\n\n"
+                "For now: use Employee List (Read-Only) to view employees."
+            )
+        )
+
+    def open_hours_readonly(self):
+        self._log_line("[Store Hours] Opened (read-only). Next phase: edit STANDARD/CUSTOM/OFF/BLOCK.")
+        self._simple_popup(
+            title="Adjust Store Hours (Read-Only Placeholder)",
+            body=(
+                "Right now:\n"
+                "- Visual Availability reads resolved hours via GET /schedule/store/<store_number>\n\n"
+                "Next step (Phase 2/3):\n"
+                "- Add endpoints to set store day status/times\n"
+                "- Add safeguards for status transitions\n"
+            )
+        )
+
+    def download_readonly(self):
+        self._log_line("[Download] Placeholder clicked. Next phase: export CSV/JSON.")
+        self._simple_popup(
+            title="Download Data (Read-Only Placeholder)",
+            body=(
+                "Next step (later):\n"
+                "- Export employees\n"
+                "- Export store schedules\n"
+                "- Export availability overlays\n\n"
+                "For now: this is a placeholder."
+            )
+        )
+
+    def _simple_popup(self, title: str, body: str):
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("560x320")
+
+        container = tk.Frame(win, padx=12, pady=12)
+        container.pack(fill="both", expand=True)
+
+        tk.Label(container, text=title, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        text = tk.Text(container, wrap="word")
+        text.pack(fill="both", expand=True, pady=(8, 10))
+        text.insert("1.0", body)
+        text.config(state="disabled")
+
+        tk.Button(container, text="Close", width=14, command=win.destroy).pack(anchor="e")
+
 # ----------------------------
 # ROOT APP
 # ----------------------------
@@ -3939,16 +4460,25 @@ class JHApp(tk.Tk):
         for F in (
                 LoginFrame,
                 MainMenuFrame,
+
+                IssueTrackingFrame,
                 ReportIssueFrame,
                 EditIssueFrame,
                 ViewOneStoreFrame,
                 ViewAllIssuesFrame,
-                UtilitiesFrame,
-                AdminToolsFrame,
                 StoreSearchFrame,
-                ChangePINFrame,
+
+                SchedulingFrame,
+                DataMgmtFrame,
+                VisualAvlFrame,
+                EmployeeFrame,
+
+                UtilitiesFrame,
                 TechInfoByStoreFrame,
-                ChangePasswordFrame
+
+                AdminToolsFrame,
+                ChangePasswordFrame,
+                ChangePINFrame,
         ):
             frame = F(parent=self.bg_label, controller=self)
             self.frames[F.__name__] = frame

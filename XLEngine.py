@@ -98,6 +98,54 @@ def parse_xlscript_block(script: str) -> List[Dict[str, Any]]:
             "payload": {},
         }]
 
+    # ADD ROW ...
+    if first.upper().startswith("ADD "):
+        # Expected:
+        # ADD ROW AFT=49 AS:
+        #   ROW="Michael Chavez"
+        #   WITH:
+        #       DAY=a
+        #       AVL=...
+        #       SNUM!=...
+        m = re.search(
+            r"ADD\s+ROW\s+(AFT|BFR)\s*=\s*(\d+)\s+AS\s*:\s*$",
+            first,
+            flags=re.IGNORECASE
+        )
+        if not m:
+            return [{"type": "ERROR", "message": 'ADD syntax invalid. Use: ADD ROW AFT=49 AS:', "raw": first}]
+
+        placement = m.group(1).upper()  # AFT or BFR
+        anchor = int(m.group(2))
+
+        statements = [ln.lstrip() for ln in lines[1:]]  # ignore leading tabs/spaces
+
+        row_name = None
+        with_lines: List[str] = []
+        in_with = False
+
+        for s in statements:
+            if s.upper().startswith("WITH"):
+                in_with = True
+                continue
+
+            if not in_with:
+                mm = re.search(r'^ROW\s*=\s*"(.*)"\s*$', s, flags=re.IGNORECASE)
+                if mm:
+                    row_name = mm.group(1).strip()
+            else:
+                with_lines.append(s)
+
+        return [{
+            "type": "ADD",
+            "target": {"where": placement, "anchor": anchor},
+            "payload": {
+                "row_name": row_name,
+                "with_raw": with_lines
+            }
+        }]
+
+
     # UPDATE BY EX
     if first.upper().startswith("UPDATE BY EX"):
         m = re.search(r"EX\s*=\s*(\d+)", first, flags=re.IGNORECASE)
@@ -150,6 +198,20 @@ def plan_actions(actions: List[Dict[str, Any]], session: XLSetupSession) -> List
             plan.append(f"RMV {a['target']['raw']} {ctx} -> structural remove (non-retrograde placeholder)")
             continue
 
+        if t == "ADD":
+            where = a["target"]["where"]
+            anchor = a["target"]["anchor"]
+            name = a["payload"].get("row_name") or "(missing ROW=\"...\")"
+            plan.append(f"ADD ROW {where}={anchor} {ctx}")
+            plan.append(f'  - ROW="{name}"')
+            with_raw = a["payload"].get("with_raw", [])
+            if with_raw:
+                plan.append("  - WITH:")
+                for s in with_raw:
+                    plan.append(f"    - {s}")
+            continue
+
+
         if t == "UPDATE":
             ex = a["target"]["ex"]
             stmts = a["payload"].get("statements_raw", [])
@@ -172,6 +234,17 @@ def plan_actions(actions: List[Dict[str, Any]], session: XLSetupSession) -> List
 
 SINGLE_LINE_PREFIXES = ("RRMV", "RMV", "RVRT")
 
+
+def is_block_header(line: str) -> bool:
+    """
+    Returns True if the line starts a multi-line block that MUST be buffered
+    (even if the buffer is currently empty).
+    """
+    up = line.strip().upper()
+    return (
+        up.startswith("UPDATE BY EX") and "WITH" in up  # UPDATE BY EX=.. WITH:
+        or up.startswith("ADD ROW") and "AS" in up      # ADD ROW AFT=.. AS:
+    )
 
 class XLScriptBufferedRepl:
     def __init__(self, session: XLSetupSession):
@@ -203,7 +276,12 @@ class XLScriptBufferedRepl:
         # Non-blank: ignore leading whitespace
         normalized = stripped_right.lstrip()
 
-        # Single-line immediate only when buffer empty
+        # If this is a block header, ALWAYS buffer it (never execute immediately)
+        if is_block_header(normalized):
+            self._buffer.append(normalized)
+            return {"executed": False, "script": None, "actions": [], "plan": []}
+
+        # Single-line immediate only when buffer empty (RMV/RRMV/RVRT)
         up = normalized.upper()
         if not self._buffer and up.startswith(SINGLE_LINE_PREFIXES):
             actions = parse_xlscript_block(normalized)

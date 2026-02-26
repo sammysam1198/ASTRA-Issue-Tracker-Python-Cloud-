@@ -1,2 +1,4 @@
-Here is my app for work. 6.0 is the newest version and has a GUI. But it's password-protected so if you want a login and youre from JH, let me know and give me your JH email, and I'll let you check it out
-Sammi
+Cloud-hosted Python backend using Flask and PostgreSQL (Render).
+Implements authentication, RBAC, environment-based configuration, and modular API architecture.
+
+6.0 is the newest version and has a GUI. But it's password-protected, so you will need credentials. Contact me for more info: samfishbein1198@gmail.com

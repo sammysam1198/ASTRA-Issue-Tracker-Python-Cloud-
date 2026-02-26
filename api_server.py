@@ -183,9 +183,76 @@ def init_db():
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schedule_employees (
+            id SERIAL PRIMARY KEY,
+            employee_uid TEXT UNIQUE NOT NULL,
+            store_number INTEGER NOT NULL,
+            full_name TEXT NOT NULL,
+            role_title TEXT,
+            is_active BOOLEAN NOT NULL DEFAULT TRUE,
+            archived_until TIMESTAMP NULL,
+            archive_reason TEXT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+        );
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schedule_availability (
+            id SERIAL PRIMARY KEY,
+            store_number INTEGER NOT NULL,
+            day_of_week INTEGER NOT NULL CHECK (day_of_week BETWEEN 0 AND 6),
+
+            status TEXT NOT NULL DEFAULT 'STANDARD',
+            -- allowed: STANDARD, CUSTOM, OFF, BLOCK
+
+            start_time TIME NULL,
+            end_time TIME NULL,
+
+            source TEXT NOT NULL DEFAULT 'manual',
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+            UNIQUE (store_number, day_of_week)
+
+        );
+        """
+    )
+    cur.execute(
+       """ 
+        CREATE TABLE IF NOT EXISTS schedule_standard_hours (
+            day_of_week INTEGER PRIMARY KEY CHECK (day_of_week BETWEEN 0 AND 6),
+            start_time TIME NOT NULL,
+            end_time TIME NOT NULL
+        );
+        """
+    )
+
+
+    
+
     # ======================
     # One Time Updates
     # ======================
+
+    cur.execute(
+        """
+        INSERT INTO schedule_standard_hours (day_of_week, start_time, end_time) VALUES
+            (0, '12:00', '16:00'),
+            (1, '11:00', '19:00'),
+            (2, '11:00', '19:00'),
+            (3, '11:00', '19:00'),
+            (4, '11:00', '19:00'),
+            (5, '11:00', '19:00'),
+            (6, '11:00', '19:00')
+            ON CONFLICT (day_of_week) DO NOTHING;
+        """
+    )
+        
+    
 
 
 
@@ -1144,8 +1211,111 @@ def admin_delete_user():
     finally:
         conn.close()
 
+# --Scheduling--------------
+
+@app.post("/schedule/init-store/<int:store_number>")
+def init_store_schedule(store_number: int):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO schedule_availability (store_number, day_of_week, status)
+        SELECT %s, d, 'STANDARD'
+        FROM generate_series(0,6) AS d
+        ON CONFLICT (store_number, day_of_week) DO NOTHING;
+    """, (store_number,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return jsonify({"ok": True, "store_number": store_number})
 
 
+@app.get("/schedule/store/<int:store_number>")
+def get_store_schedule(store_number: int):
+    conn = get_db_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO schedule_availability (store_number, day_of_week, status)
+        SELECT %s, d, 'STANDARD'
+        FROM generate_series(0,6) AS d
+        ON CONFLICT (store_number, day_of_week) DO NOTHING;
+    """, (store_number,))
+    conn.commit()
+
+    cur.execute("""
+        SELECT
+            a.day_of_week,
+            a.status,
+            CASE
+                WHEN a.status = 'CUSTOM' THEN a.start_time
+                WHEN a.status = 'STANDARD' THEN s.start_time
+                ELSE NULL
+            END AS resolved_start,
+            CASE
+                WHEN a.status = 'CUSTOM' THEN a.end_time
+                WHEN a.status = 'STANDARD' THEN s.end_time
+                ELSE NULL
+            END AS resolved_end,
+            a.updated_at
+        FROM schedule_availability a
+        LEFT JOIN schedule_standard_hours s
+            ON s.day_of_week = a.day_of_week
+        WHERE a.store_number = %s
+        ORDER BY a.day_of_week ASC;
+    """, (store_number,))
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    def t(v):
+        return v.strftime("%H:%M") if v else None
+
+    return jsonify({
+        "store_number": store_number,
+        "days": [
+            {
+                "day": r["day_of_week"],
+                "status": r["status"],
+                "start": t(r["resolved_start"]),
+                "end": t(r["resolved_end"]),
+                "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None
+            }
+            for r in rows
+        ]
+    })
+
+
+@app.get("/schedule/employees/<int:store_number>")
+def get_employees(store_number: int):
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT employee_uid, full_name, role_title, is_active, archived_until
+        FROM schedule_employees
+        WHERE store_number = %s
+        ORDER BY full_name ASC;
+    """, (store_number,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    return jsonify({
+        "store_number": store_number,
+        "employees": [
+            {
+                "employee_uid": r["employee_uid"],
+                "full_name": r["full_name"],
+                "role_title": r["role_title"],
+                "is_active": r["is_active"],
+                "archived_until": r["archived_until"].isoformat() if r["archived_until"] else None
+            } for r in rows
+        ]
+    })
+
+
+
+# --ISSUE TRACKER------------
 
 @app.post("/issues")
 def add_issue():
@@ -1864,6 +2034,13 @@ def import_devices():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# --- Ensure DB schema exists on Render/Gunicorn import ---
+try:
+    init_db()
+except Exception as e:
+    # Keep the service booting so you can still see logs/routes,
+    # but you should check Render logs for this message.
+    print(f"[init_db] failed: {e}")
 
 
 if __name__ == "__main__":

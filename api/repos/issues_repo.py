@@ -2,6 +2,113 @@ import json
 from flask import Flask, jsonify, request
 
 
+@app.post("/issues")
+def add_issue():
+    """
+    Add a new issue to the database.
+
+    Expected JSON body:
+    {
+      "store_name": "Store 123 - Main St",
+      "issue": {
+        "Name": "...",              # or "Issue Name"
+        "Priority": "...",
+        "Store Number": "12345",
+        "Computer Number": "PC-01",
+        "Device": "Computer",       # <--- device type
+        "Category": "Hardware",     # <--- problem category
+        "Description": "...",
+        "Narrative": "",
+        "Replicable?": "Yes/No",
+        "Global Issue": "False",
+        "Global Number": "12",
+        "Status": "Unresolved",
+        "Resolution": ""
+      }
+    }
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "JSON body required"}), 400
+
+    store_name = data.get("store_name")
+    issue = data.get("issue")
+
+    if not store_name or not issue:
+        return jsonify({"error": "store_name and issue are required"}), 400
+
+    # Pull fields out of the issue dict
+    store_number = issue.get("Store Number")
+    issue_name = issue.get("Name") or issue.get("Issue Name")
+    priority = issue.get("Priority")
+    computer_number = issue.get("Computer Number")
+    device_type = issue.get("Device")          # <--- NEW
+    category = issue.get("Category")           # <--- NEW
+    description = issue.get("Description")
+    narrative = issue.get("Narrative", "")
+    replicable = issue.get("Replicable?")
+    raw_global_issue = issue.get("Global Issue")
+    raw_global_num = issue.get("Global Number")
+    status = issue.get("Status")
+    resolution = issue.get("Resolution", "")
+
+    # --- NORMALIZE global_issue TO BOOL ---
+    if isinstance(raw_global_issue, bool):
+        global_issue = raw_global_issue
+    else:
+        global_issue = str(raw_global_issue).strip().lower() in ("true", "yes", "y", "1")
+
+    # --- NORMALIZE global_num TO INT OR NONE ---
+        # --- NORMALIZE global_num TO INT OR NONE ---
+    if raw_global_num not in (None, ""):
+        try:
+            global_num = int(raw_global_num)
+        except ValueError:
+            return jsonify({"error": "Global Number must be an integer"}), 400
+    else:
+        global_num = None
+
+    
+    conn = get_db_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO issues (
+            store_name, store_number, issue_name, priority,
+            computer_number, device_type, category,
+            description, narrative, replicable, global_issue, 
+            global_num, status, resolution
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING *;
+        """,
+        (
+            store_name,
+            int(store_number) if store_number is not None else None,
+            issue_name,
+            priority,
+            computer_number,
+            device_type,
+            category,
+            description,
+            narrative,
+            replicable,
+            global_issue,
+            global_num if global_num is not None else None,
+            status,
+            resolution,
+        ),
+    )
+    new_issue = cur.fetchone()
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return jsonify({"message": "Issue added", "issue": new_issue}), 201
+
+
+
+
 @app.get("/issues/all")
 def get_all_issues():
     """
